@@ -4,3 +4,6 @@ numpy>=1.26
 pylibjpeg
 pylibjpeg-libjpeg
 pylibjpeg-openjpeg
+vtk>=9.2
+pyvista>=0.43
+pyvistaqt>=0.11

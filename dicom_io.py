@@ -176,22 +176,48 @@ def load_series_from_folder(folder: str) -> Tuple[Optional[SeriesData], Optional
     # 表示用の time ラベル
     time_labels = [time_pretty_map[t] for t in t_sorts]
 
-    # メタ情報まとめ
+    # 方向行列と原点（LPS座標）
+    iop = _safe_get(ds0, "ImageOrientationPatient", [1,0,0, 0,1,0])  # [rx,ry,rz, cx,cy,cz]
+    row = np.array(iop[0:3], dtype=float)
+    col = np.array(iop[3:6], dtype=float)
+    # スライス法線（右手系）
+    norm = np.cross(row, col)
+    # SimpleITK は LPS 準拠なのでこのまま使える
+    direction = np.array([row, col, norm]).T  # 3x3（列が軸ベクトルでも可、flatten順に注意）
+    # origin は最初のスライスのIPP
+    origin = np.array(_safe_get(ds0, "ImagePositionPatient", [0,0,0]), dtype=float)
+
+    photometric = str(_safe_get(ds0, "PhotometricInterpretation", "MONOCHROME2")).upper()
+
+    def _first_number(v, default=None):
+        try:
+            if v is None:
+                return default
+            if isinstance(v, (list, tuple)):
+                return float(v[0]) if len(v) else default
+            return float(v)
+        except Exception:
+            return default
+
+    wc = _first_number(_safe_get(ds0, "WindowCenter", None))
+    ww = _first_number(_safe_get(ds0, "WindowWidth", None))
+
     meta = {
-        "spacing": spacing,
-        "shape": volumes[0].shape,
-        "SeriesDescription": _safe_get(first_ds0, "SeriesDescription", "") if first_ds0 else "",
-        "Modality": _safe_get(first_ds0, "Modality", "") if first_ds0 else "",
-        "ds0": first_ds0,
+        "spacing": (zspacing, py, px),                 # (Z, Y, X)
+        "shape": vol.shape,                            # [Z,Y,X]
+        "SeriesDescription": _safe_get(ds0, "SeriesDescription", ""),
+        "Modality": _safe_get(ds0, "Modality", ""),
+        "ds0": ds0,
         "photometric": photometric,
         "window_center": wc,
         "window_width": ww,
-        # 時系列
-        "time_tag": time_tag_name or "None",
-        "time_keys": t_sorts,           # ソート可能なキー（float）
-        "time_labels": time_labels,     # UI表示用の文字列
-        "volumes": volumes,             # List[np.ndarray], 各 t の [Z,Y,X]
+        # 追加：
+        "origin": origin,                               # (x,y,z) in mm (LPS)
+        "direction": direction.flatten().tolist(),      # 3x3 をフラットに
+        # 時系列（あなたの最新版なら↓も既にあります）
+        "time_tag": time_tag_name if 'time_tag_name' in locals() else "None",
+        "time_keys": t_sorts if 't_sorts' in locals() else [0.0],
+        "time_labels": time_labels if 'time_labels' in locals() else ["t=0"],
+        "volumes": volumes if 'volumes' in locals() else [vol],
     }
-
-    # 後方互換のため volume は t=0
-    return SeriesData(volumes[0], meta), None
+    return SeriesData(volumes[0] if 'volumes' in locals() else vol.astype(np.float32), meta), None
