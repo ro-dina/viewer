@@ -26,3 +26,9 @@ DICOM/
 *.dcm
 *.nii
 *.nii.gz
+
+# 追加推奨（既にあればOK）
+*.so
+*.dylib
+*.dll
+*.log
