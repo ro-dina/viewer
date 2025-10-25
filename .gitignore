@@ -20,3 +20,9 @@ venv/
 
 # VS Code
 .vscode/
+
+# User data or sample images (DICOM)
+DICOM/
+*.dcm
+*.nii
+*.nii.gz
