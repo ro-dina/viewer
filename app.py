@@ -4,8 +4,6 @@ import os, sys, glob, platform
 import numpy as np
 import argparse
 import subprocess
-import faulthandler
-faulthandler.enable()
 
 # --- VTK required backends ---
 import vtkmodules.vtkInteractionStyle
@@ -28,6 +26,29 @@ try:
 except Exception:
     print("pydicom が見つかりません。`pip install pydicom` を実行してください。")
     sys.exit(1)
+
+def _ensure_stdio():
+    # --noconsole で None になることがあるので補正
+    if getattr(sys, "stdout", None) is None:
+        sys.stdout = open(os.devnull, "w")
+    if getattr(sys, "stderr", None) is None:
+        sys.stderr = open(os.devnull, "w")
+
+_ensure_stdio()
+
+# faulthandler を使っている場合はガード
+try:
+    import faulthandler
+    if sys.stderr:
+        faulthandler.enable()   # ここでRuntimeErrorを避ける
+except Exception:
+    pass
+
+parser = argparse.ArgumentParser(
+    description="Pure VTK DICOM viewer",
+    exit_on_error=False
+)
+
 
 # ---------- DICOM -> NumPy (Z,Y,X) ----------
 def load_dicom_series(dcm_dir: str):
@@ -610,6 +631,7 @@ def main():
     parser.add_argument("--launch-qt", action="store_true", help="Start PySide6 2D viewer")
     args = parser.parse_args()
 
+
     # --- Entry point logic: prefer launching Qt UI unless --viewer is given ---
     qt_path = os.path.join(os.path.dirname(__file__), "app_qt.py")
     if args.launch_qt and os.path.exists(qt_path):
@@ -664,11 +686,17 @@ def main():
     status = tk.StringVar(value=f"Loaded: {os.path.basename(dcmdir)}  shape={vol.shape}")
 
     def spawn_viewer(mode: str):
-        cmd = [sys.executable, sys.argv[0], "--dir", dcmdir, "--viewer", mode]
         try:
+            if getattr(sys, "frozen", False):
+                # PyInstaller EXE 実行時は、自分自身の EXE を再起動
+                cmd = [sys.executable, "--dir", dcmdir, "--viewer", mode]
+            else:
+                # ソース実行時
+                cmd = [sys.executable, sys.argv[0], "--dir", dcmdir, "--viewer", mode]
             subprocess.Popen(cmd)
         except Exception as e:
             messagebox.showerror("Launch Error", f"Failed to start viewer: {e}")
+
 
     def open_2d3d():
         spawn_viewer("2d3d")
