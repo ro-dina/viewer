@@ -287,6 +287,56 @@ class PureVTKViewer:
         self.ren.ResetCamera()
         self.win.Render()
 
+    # app.py のどこか（VolumeProperty を作った近くが分かりやすい）に追加
+    def _apply_window_to_tf(volume_property, wl: float, ww: float, mode: str = "window"):
+        """
+        wl, ww から [low, high] を作り、Color/Opacityを組み立てる。
+        mode:
+        - "window": 低→高で徐々に不透明（クラシックなWL/WW）
+        - "bandpass": low..high の“帯域のみ”を可視化（上下どちらもゼロに落とす）
+        """
+        low = float(wl) - float(ww)/2.0
+        high = float(wl) + float(ww)/2.0
+        if high <= low:
+            high = low + 1.0
+
+        ctf = volume_property.GetRGBTransferFunction(0)
+        otf = volume_property.GetScalarOpacity(0)
+        ctf.RemoveAllPoints()
+        otf.RemoveAllPoints()
+
+        # --- 色はシンプルにグレースケール（必要なら任意色で置き換え可）
+        ctf.AddRGBPoint(low,  0.0, 0.0, 0.0)
+        ctf.AddRGBPoint(high, 1.0, 1.0, 1.0)
+
+        if mode == "bandpass":
+            # 帯域の「中だけ」見せる：outside を 0（ゼロ）に戻す
+            mid = (low + high)/2.0
+            margin = max(ww * 0.05, 5)  # 硬すぎないよう少し余白
+            otf.AddPoint(low - 2*margin, 0.0)
+            otf.AddPoint(low,            0.0)
+            otf.AddPoint(mid,            0.5)  # 山の高さ（0.2〜0.8で調整）
+            otf.AddPoint(high,           0.0)
+            otf.AddPoint(high + 2*margin,0.0)
+        else:
+            # いわゆる普通のWL/WW：low から高へなだらかに 0→1
+            tail = max(ww * 0.10, 20)        # 両端の尻尾を少し伸ばして見やすく
+            otf.AddPoint(low - tail,  0.0)
+            otf.AddPoint(low,         0.0)
+            otf.AddPoint((low+high)/2, 0.3)  # 中腹（濃さの好みで）
+            otf.AddPoint(high,        1.0)
+            otf.AddPoint(high + tail, 1.0)
+
+        # 斑点ノイズ抑制に、勾配不透明度も少しだけ
+        try:
+            gtf = volume_property.GetGradientOpacity(0)
+            gtf.RemoveAllPoints()
+            gtf.AddPoint(0.0,  0.0)
+            gtf.AddPoint(10.0, 0.2)
+            gtf.AddPoint(50.0, 0.6)
+        except Exception:
+            pass
+
     def update_status(self):
         txt = f"{self.plane} | Slice {self.slice_index}/{self.max_index_for_plane()} | WL/WW={int(self.wl)}/{int(self.ww)}"
         if self.mode_3d:
@@ -313,6 +363,12 @@ class VTK3DWindow:
         self.wl, self.ww = (wl, ww) if (wl is not None and ww is not None) else robust_wl_ww(vol_np)
         self.mip = False
 
+        # Windowing modes: "window" (WL/WW) or "band" (Low/High band-pass)
+        self.mode = "window"
+        # Keep both representations and sync them
+        self.low = self.wl - self.ww/2.0
+        self.high = self.wl + self.ww/2.0
+
         self.ren = vtkRenderer()
         self.ren.SetBackground(0.02, 0.02, 0.03)
         self.win = vtkRenderWindow()
@@ -324,6 +380,14 @@ class VTK3DWindow:
             pass
         self.iren = vtkRenderWindowInteractor()
         self.iren.SetRenderWindow(self.win)
+
+        # --- Status text actor (create early; used by _update_tf via _update_text) ---
+        self.text = vtkTextActor()
+        tp: vtkTextProperty = self.text.GetTextProperty()
+        tp.SetFontSize(14)
+        tp.SetColor(0.95, 0.95, 0.95)
+        self.text.SetDisplayPosition(10, 10)
+        self.ren.AddViewProp(self.text)
 
         self.ctf = vtkColorTransferFunction()
         self.otf = vtkPiecewiseFunction()
@@ -345,16 +409,133 @@ class VTK3DWindow:
 
         self.iren.AddObserver("KeyPressEvent", self._on_key)
 
+        # --- Sliders for WL/WW ---
+        self.slider_wl = self._make_slider(-1500, 3000, self.wl, 0.25, 0.08, "WL", self._on_wl_slider)
+        self.slider_ww = self._make_slider(1, 6000, self.ww, 0.60, 0.08, "WW", self._on_ww_slider)
+
+        # Sliders for band-pass (Low/High). Initially hidden.
+        self.slider_low = self._make_slider(-1500, 3000, self.low, 0.25, 0.08, "Low", self._on_low_slider)
+        self.slider_high = self._make_slider(-1500, 3000, self.high, 0.60, 0.08, "High", self._on_high_slider)
+        self.slider_low.EnabledOff()
+        self.slider_high.EnabledOff()
+
+        # --- Update status text ---
+        self._update_text()
+        print("Keys: M=MIP, +/-=WW, [ / ]=WL, B=Band-pass toggle")
+
     def _update_tf(self):
-        low = self.wl - self.ww/2.0
-        high = self.wl + self.ww/2.0
+        low = self.low if self.mode == "band" else (self.wl - self.ww/2.0)
+        high = self.high if self.mode == "band" else (self.wl + self.ww/2.0)
+        if high <= low:
+            high = low + 1.0
+
+        # sync WL/WW and Low/High both ways for consistency
+        self.wl = (low + high) / 2.0
+        self.ww = max(high - low, 1.0)
+
         self.ctf.RemoveAllPoints()
         self.ctf.AddRGBPoint(low, 0,0,0)
         self.ctf.AddRGBPoint(high, 1,1,1)
+
         self.otf.RemoveAllPoints()
-        self.otf.AddPoint(low, 0.0)
-        self.otf.AddPoint((low+high)/2.0, 0.2)
-        self.otf.AddPoint(high, 1.0)
+        if self.mode == "band":
+            # band-pass: only the band is visible, outside is 0 opacity
+            mid = (low + high) / 2.0
+            margin = max(self.ww * 0.05, 5.0)
+            self.otf.AddPoint(low - 2*margin, 0.0)
+            self.otf.AddPoint(low,            0.0)
+            self.otf.AddPoint(mid,            0.6)
+            self.otf.AddPoint(high,           0.0)
+            self.otf.AddPoint(high + 2*margin,0.0)
+        else:
+            # classic windowing
+            tail = max(self.ww * 0.10, 20.0)
+            self.otf.AddPoint(low - tail,  0.0)
+            self.otf.AddPoint(low,         0.0)
+            self.otf.AddPoint((low+high)/2.0, 0.2)
+            self.otf.AddPoint(high,        1.0)
+            self.otf.AddPoint(high + tail, 1.0)
+
+        # Update status text as well
+        self._update_text()
+
+    def _make_slider(self, vmin, vmax, vinit, x_norm, y_norm, title, cb):
+        rep = vtkSliderRepresentation2D()
+        rep.SetMinimumValue(float(vmin))
+        rep.SetMaximumValue(float(vmax))
+        rep.SetValue(float(vinit))
+        rep.SetTitleText(title)
+        rep.GetTitleProperty().SetColor(0.95, 0.95, 0.95)
+        rep.GetLabelProperty().SetColor(0.95, 0.95, 0.95)
+        # Use normalized display coordinates for position
+        p1 = rep.GetPoint1Coordinate()
+        p1.SetCoordinateSystemToNormalizedDisplay()
+        p1.SetValue(x_norm, y_norm)
+        p2 = rep.GetPoint2Coordinate()
+        p2.SetCoordinateSystemToNormalizedDisplay()
+        p2.SetValue(x_norm + 0.2, y_norm)
+        slider = vtkSliderWidget()
+        slider.SetInteractor(self.iren)
+        slider.SetRepresentation(rep)
+        slider.SetAnimationModeToAnimate()
+        slider.EnabledOn()
+        slider.AddObserver("InteractionEvent", cb)
+        return slider
+
+    def _update_text(self):
+        if not hasattr(self, "text"):
+            return
+        if self.mode == "band":
+            status = f"Low: {int(self.low)}  High: {int(self.high)}   Mode: Band-pass"
+        else:
+            status = f"WL: {int(self.wl)}  WW: {int(self.ww)}   Mode: {'MIP' if self.mip else 'Composite'}"
+        # Append mapper mode if in 3D
+        if hasattr(self, "mip"):
+            status += f"   Blend: {'MIP' if self.mip else 'Composite'}"
+        self.text.SetInput(status)
+
+    def _on_low_slider(self, obj, ev):
+        self.low = float(obj.GetRepresentation().GetValue())
+        # clamp to keep low < high
+        if self.low >= self.high:
+            self.low = self.high - 1.0
+            obj.GetRepresentation().SetValue(self.low)
+        self._update_tf()
+        self.win.Render()
+
+    def _on_high_slider(self, obj, ev):
+        self.high = float(obj.GetRepresentation().GetValue())
+        if self.high <= self.low:
+            self.high = self.low + 1.0
+            obj.GetRepresentation().SetValue(self.high)
+        self._update_tf()
+        self.win.Render()
+
+    def _on_wl_slider(self, obj, ev):
+        self.wl = float(obj.GetRepresentation().GetValue())
+        # sync band values
+        self.low = self.wl - self.ww/2.0
+        self.high = self.wl + self.ww/2.0
+        if hasattr(self, "slider_low"):
+            self.slider_low.GetRepresentation().SetValue(self.low)
+        if hasattr(self, "slider_high"):
+            self.slider_high.GetRepresentation().SetValue(self.high)
+        self._update_tf()
+        self.win.Render()
+
+    def _on_ww_slider(self, obj, ev):
+        self.ww = float(obj.GetRepresentation().GetValue())
+        if self.ww < 1.0:
+            self.ww = 1.0
+        # sync band values
+        self.low = self.wl - self.ww/2.0
+        self.high = self.wl + self.ww/2.0
+        if hasattr(self, "slider_low"):
+            self.slider_low.GetRepresentation().SetValue(self.low)
+        if hasattr(self, "slider_high"):
+            self.slider_high.GetRepresentation().SetValue(self.high)
+        self._update_tf()
+        self.win.Render()
 
     def _on_key(self, obj, ev):
         key = self.iren.GetKeySym().lower()
@@ -365,6 +546,7 @@ class VTK3DWindow:
             else:
                 self.mapper.SetBlendModeToComposite()
             self.win.Render()
+            self._update_text()
         elif key in ('equal', 'plus'):   # '=' / '+' でWW拡大
             self.ww *= 1.1
             self._update_tf(); self.win.Render()
@@ -375,6 +557,22 @@ class VTK3DWindow:
             self.wl += 20; self._update_tf(); self.win.Render()
         elif key == 'bracketleft':   # '[' でWL-
             self.wl -= 20; self._update_tf(); self.win.Render()
+        elif key == 'b':
+            # Toggle window <-> band-pass
+            self.mode = "band" if self.mode == "window" else "window"
+            # Show the appropriate slider pair
+            if self.mode == "band":
+                self.slider_wl.EnabledOff()
+                self.slider_ww.EnabledOff()
+                self.slider_low.EnabledOn()
+                self.slider_high.EnabledOn()
+            else:
+                self.slider_low.EnabledOff()
+                self.slider_high.EnabledOff()
+                self.slider_wl.EnabledOn()
+                self.slider_ww.EnabledOn()
+            self._update_tf()
+            self.win.Render()
 
     def start(self, size=(900, 700)):
         self.win.SetSize(*size)
@@ -392,12 +590,36 @@ def run_viewer_mode(vtk_img, vol, spacing, mode: str):
         viewer.start()
 
 # ---------- main ----------
+def _spawn_qt(dcmdir):
+    import subprocess
+    import sys
+    import os
+    cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "app_qt.py")]
+    if dcmdir is not None:
+        cmd += ["--dir", dcmdir]
+    try:
+        subprocess.call(cmd)
+    except Exception as e:
+        print(f"Failed to launch PySide6 2D viewer: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pure VTK DICOM viewer")
     parser.add_argument("--dir", dest="dcmdir", default=None, help="DICOM folder")
     parser.add_argument("--viewer", dest="viewer", default=None, choices=["2d3d","3d"], help="Run viewer directly (no Tk controller)")
+    parser.add_argument("--launch-qt", action="store_true", help="Start PySide6 2D viewer")
     args = parser.parse_args()
 
+    # --- Entry point logic: prefer launching Qt UI unless --viewer is given ---
+    qt_path = os.path.join(os.path.dirname(__file__), "app_qt.py")
+    if args.launch_qt and os.path.exists(qt_path):
+        _spawn_qt(args.dcmdir)
+        return
+    if args.viewer is None and os.path.exists(qt_path):
+        _spawn_qt(args.dcmdir)
+        return
+
+    # --- Pure VTK fallback flow ---
     # 1) Determine DICOM directory
     dcmdir = args.dcmdir
     if not dcmdir:
@@ -405,12 +627,11 @@ def main():
             import tkinter as tk
             from tkinter import filedialog
             root = tk.Tk(); root.withdraw()
-            #dcmdir = filedialog.askdirectory(title="Select DICOM folder")
             home_dir = os.path.expanduser("~")
             dcmdir = filedialog.askdirectory(
-    title="Select DICOM folder",
-    initialdir=home_dir
-)
+                title="Select DICOM folder",
+                initialdir=home_dir
+            )
             root.destroy()
         except Exception:
             dcmdir = None
