@@ -4,8 +4,6 @@ import os, sys, glob, platform
 import numpy as np
 import argparse
 import subprocess
-import faulthandler
-faulthandler.enable()
 
 # --- VTK required backends ---
 import vtkmodules.vtkInteractionStyle
@@ -23,11 +21,30 @@ from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
 from vtkmodules.vtkInteractionWidgets import vtkSliderRepresentation2D, vtkSliderWidget, vtkOrientationMarkerWidget
 from vtkmodules.vtkRenderingVolume import vtkFixedPointVolumeRayCastMapper
 
+
 try:
     import pydicom
 except Exception:
     print("pydicom が見つかりません。`pip install pydicom` を実行してください。")
     sys.exit(1)
+
+# --- faulthandler guarded setup ---
+def _ensure_stdio():
+    # PyInstaller --noconsole だと None になる場合があるので補正
+    if getattr(sys, "stdout", None) is None:
+        sys.stdout = open(os.devnull, "w")
+    if getattr(sys, "stderr", None) is None:
+        sys.stderr = open(os.devnull, "w")
+
+_ensure_stdio()
+
+# faulthandler は stderr が必要。None の場合に備えてガード。
+try:
+    import faulthandler
+    if sys.stderr:
+        faulthandler.enable()
+except Exception:
+    pass
 
 # ---------- DICOM -> NumPy (Z,Y,X) ----------
 def load_dicom_series(dcm_dir: str):
@@ -664,8 +681,13 @@ def main():
     status = tk.StringVar(value=f"Loaded: {os.path.basename(dcmdir)}  shape={vol.shape}")
 
     def spawn_viewer(mode: str):
-        cmd = [sys.executable, sys.argv[0], "--dir", dcmdir, "--viewer", mode]
         try:
+            if getattr(sys, "frozen", False):
+                # PyInstaller EXE の場合は自分自身の EXE を再起動
+                cmd = [sys.executable, "--dir", dcmdir, "--viewer", mode]
+            else:
+                # 通常の Python 実行
+                cmd = [sys.executable, sys.argv[0], "--dir", dcmdir, "--viewer", mode]
             subprocess.Popen(cmd)
         except Exception as e:
             messagebox.showerror("Launch Error", f"Failed to start viewer: {e}")
