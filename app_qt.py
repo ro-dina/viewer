@@ -261,34 +261,62 @@ class Viewer2D(QtWidgets.QWidget):
 
     # ---------- 3D 起動 ----------
     def on_open_3d(self):
+        """Launch 3D viewer.
+        - Frozen (PyInstaller): look for sibling DICOMViewer3D app/exe next to this app and pass the DICOM dir.
+        - Dev (not frozen): run app.py with the current Python interpreter.
+        """
         if not self._dcmdir:
             return
 
         try:
-            # 1) PyInstaller EXE 実行時
+            from pathlib import Path
             if getattr(sys, "frozen", False):
-                exe_dir = Path(sys.executable).parent
-                # Windows
-                cand = exe_dir / "DICOMViewer3D.exe"
-                if cand.exists():
-                    subprocess.Popen([str(cand), "--dir", self._dcmdir, "--viewer", "3d"])
+                exe_path = Path(sys.executable).resolve()
+                if sys.platform.startswith("darwin"):
+                    # .../DICOMViewer2D.app/Contents/MacOS/DICOMViewer2D
+                    bundle_root = exe_path.parents[2]   # .../DICOMViewer2D.app
+                    dist_dir = bundle_root.parent       # directory that contains the .app bundles
+                    app3d = dist_dir / "DICOMViewer3D.app"
+                    if not app3d.exists():
+                        QtWidgets.QMessageBox.critical(
+                            self, "Launch Error",
+                            f"3D app not found:\n{app3d}\n\n"
+                            "Make sure you built it with:\n"
+                            "pyinstaller --windowed --onefile --name DICOMViewer3D app.py"
+                        )
+                        return
+                    subprocess.Popen([
+                        "open", "-a", str(app3d), "--args",
+                        "--dir", self._dcmdir, "--viewer", "3d",
+                    ])
                     return
-                # macOS .app の場合（必要なら）
-                mac_app = exe_dir / "DICOMViewer3D.app" / "Contents" / "MacOS" / "DICOMViewer3D"
-                if mac_app.exists():
-                    subprocess.Popen([str(mac_app), "--dir", self._dcmdir, "--viewer", "3d"])
+                elif sys.platform.startswith("win"):
+                    # ...\\DICOMViewer2D.exe (dist フォルダ内)
+                    app3d = exe_path.parent / "DICOMViewer3D.exe"
+                    if not app3d.exists():
+                        QtWidgets.QMessageBox.critical(
+                            self, "Launch Error",
+                            f"3D app not found:\n{app3d}\n\n"
+                            "Make sure the 3D EXE sits next to DICOMViewer2D.exe."
+                        )
+                        return
+                    subprocess.Popen([str(app3d), "--dir", self._dcmdir, "--viewer", "3d"])
                     return
-                # 見つからないときは fallthrough で Python 実行に切り替え
-
-            # 2) 通常の Python 実行時（または EXE が見つからない場合）
-            app3d = Path(__file__).resolve().parent / "app.py"
-            if app3d.exists():
-                subprocess.Popen([sys.executable, str(app3d), "--dir", self._dcmdir, "--viewer", "3d"])
+                else:
+                    # Linux等。隣に DICOMViewer3D がある想定（必要に応じて調整）
+                    app3d = exe_path.parent / "DICOMViewer3D"
+                    if app3d.exists():
+                        subprocess.Popen([str(app3d), "--dir", self._dcmdir, "--viewer", "3d"])
+                        return
+                    QtWidgets.QMessageBox.critical(self, "Launch Error", f"3D app not found: {app3d}")
+                    return
             else:
-                QtWidgets.QMessageBox.critical(self, "Launch Error",
-                    "DICOMViewer3D が見つかりませんでした。\n"
-                    "EXE の場合は同じフォルダに DICOMViewer3D.exe を置いてください。"
-                )
+                # Development mode: run adjacent app.py with current Python
+                app3d = Path(__file__).resolve().parent / "app.py"
+                if not app3d.exists():
+                    QtWidgets.QMessageBox.critical(self, "Launch Error", f"app.py not found: {app3d}")
+                    return
+                subprocess.Popen([sys.executable, str(app3d), "--dir", self._dcmdir, "--viewer", "3d"])
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Launch Error", str(e))
 

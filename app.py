@@ -21,14 +21,16 @@ from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
 from vtkmodules.vtkInteractionWidgets import vtkSliderRepresentation2D, vtkSliderWidget, vtkOrientationMarkerWidget
 from vtkmodules.vtkRenderingVolume import vtkFixedPointVolumeRayCastMapper
 
+
 try:
     import pydicom
 except Exception:
     print("pydicom が見つかりません。`pip install pydicom` を実行してください。")
     sys.exit(1)
 
+# --- faulthandler guarded setup ---
 def _ensure_stdio():
-    # --noconsole で None になることがあるので補正
+    # PyInstaller --noconsole だと None になる場合があるので補正
     if getattr(sys, "stdout", None) is None:
         sys.stdout = open(os.devnull, "w")
     if getattr(sys, "stderr", None) is None:
@@ -36,19 +38,13 @@ def _ensure_stdio():
 
 _ensure_stdio()
 
-# faulthandler を使っている場合はガード
+# faulthandler は stderr が必要。None の場合に備えてガード。
 try:
     import faulthandler
     if sys.stderr:
-        faulthandler.enable()   # ここでRuntimeErrorを避ける
+        faulthandler.enable()
 except Exception:
     pass
-
-parser = argparse.ArgumentParser(
-    description="Pure VTK DICOM viewer",
-    exit_on_error=False
-)
-
 
 # ---------- DICOM -> NumPy (Z,Y,X) ----------
 def load_dicom_series(dcm_dir: str):
@@ -688,10 +684,10 @@ def main():
     def spawn_viewer(mode: str):
         try:
             if getattr(sys, "frozen", False):
-                # PyInstaller EXE 実行時は、自分自身の EXE を再起動
+                # PyInstaller EXE の場合は自分自身の EXE を再起動
                 cmd = [sys.executable, "--dir", dcmdir, "--viewer", mode]
             else:
-                # ソース実行時
+                # 通常の Python 実行
                 cmd = [sys.executable, sys.argv[0], "--dir", dcmdir, "--viewer", mode]
             subprocess.Popen(cmd)
         except Exception as e:
