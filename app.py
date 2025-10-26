@@ -405,7 +405,12 @@ def main():
             import tkinter as tk
             from tkinter import filedialog
             root = tk.Tk(); root.withdraw()
-            dcmdir = filedialog.askdirectory(title="Select DICOM folder")
+            #dcmdir = filedialog.askdirectory(title="Select DICOM folder")
+            home_dir = os.path.expanduser("~")
+            dcmdir = filedialog.askdirectory(
+    title="Select DICOM folder",
+    initialdir=home_dir
+)
             root.destroy()
         except Exception:
             dcmdir = None
