@@ -14,11 +14,21 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from shiboken6 import isValid
 import argparse
 
+from pathlib import Path
+
 try:
     import pydicom
 except Exception:
     QtWidgets.QMessageBox.critical(None, "Error", "pydicom がありません。pip install pydicom")
     sys.exit(1)
+
+def resource_path(rel: str) -> str:
+    """PyInstaller(onefile) で同梱したファイルに安全にアクセスするためのヘルパー"""
+    base = getattr(sys, '_MEIPASS', None)
+    if base:
+        return str(Path(base) / rel)
+    # 通常実行時はスクリプト隣接
+    return str(Path(__file__).resolve().parent / rel)
 
 # ---------- DICOM 読み込み ----------
 def load_dicom_series(dcmdir: str):
@@ -251,10 +261,40 @@ class Viewer2D(QtWidgets.QWidget):
 
     # ---------- 3D 起動 ----------
     def on_open_3d(self):
-        if not self._dcmdir: return
-        cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "app.py"), "--dir", self._dcmdir, "--viewer", "3d"]
+        """Launch 3D viewer.
+        - Packaged (PyInstaller): open DICOMViewer3D.app as a separate app and pass the DICOM dir.
+        - Dev (not frozen): run app.py with the current Python interpreter.
+        """
+        if not self._dcmdir:
+            return
         try:
-            subprocess.Popen(cmd)
+            from pathlib import Path
+            # When frozen by PyInstaller, sys.executable points to
+            # .../DICOMViewer2D.app/Contents/MacOS/DICOMViewer2D
+            if getattr(sys, 'frozen', False):
+                exe_path = Path(sys.executable).resolve()
+                # dist_dir is the directory that contains the .app bundles
+                # parents: [0]=MacOS, [1]=Contents, [2]=DICOMViewer2D.app, [3]=dist
+                dist_dir = exe_path.parents[3]
+                app3d = dist_dir / "DICOMViewer3D.app"
+                if not app3d.exists():
+                    QtWidgets.QMessageBox.critical(
+                        self, "Launch Error",
+                        f"3D app not found:\n{app3d}\n\nMake sure you built it with:\n"
+                        "pyinstaller --windowed --onefile --name DICOMViewer3D app.py"
+                    )
+                    return
+                # Use macOS 'open -a' and pass args after --args
+                subprocess.Popen([
+                    "open", "-a", str(app3d), "--args",
+                    "--dir", self._dcmdir, "--viewer", "3d",
+                ])
+            else:
+                # Development mode: run adjacent app.py with current Python
+                app3d = str(Path(__file__).resolve().parent / "app.py")
+                subprocess.Popen([
+                    sys.executable, app3d, "--dir", self._dcmdir, "--viewer", "3d"
+                ])
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Launch Error", str(e))
 

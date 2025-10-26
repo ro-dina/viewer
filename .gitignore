@@ -32,3 +32,28 @@ DICOM/
 *.dylib
 *.dll
 *.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# PyInstaller
+*.spec
+/build/
+/dist/
+/*.pkg
+/*.toc
+/*.zip
+
+# macOS
+.DS_Store
+
+# Virtual environment
+.venv/
+env/
+
+# Logs
+*.log
