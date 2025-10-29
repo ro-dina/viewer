@@ -104,6 +104,23 @@ def ndarray_to_qimage(gray_u8: np.ndarray) -> QtGui.QImage:
     img = QtGui.QImage(buf, w, h, w, QtGui.QImage.Format_Grayscale8)
     return img
 
+# ---------- 行間ギャップ挿入 ----------
+def insert_row_gaps(gray_u8: np.ndarray, gap_px: int, gap_value: int = 0) -> np.ndarray:
+    """
+    Insert horizontal gaps (gap_px pixels of value=gap_value) between each row.
+    Intended for (Z, X) or (Z, Y) images so that adjacent slices along Z appear separated.
+    """
+    if gap_px <= 0:
+        return gray_u8
+    h, w = gray_u8.shape  # h corresponds to Z
+    # Output height: each original row + gap after it, except the last one
+    out_h = h + (h - 1) * gap_px
+    out = np.full((out_h, w), gap_value, dtype=np.uint8)
+    for i in range(h):
+        dst_row = i * (gap_px + 1)
+        out[dst_row:dst_row + 1, :] = gray_u8[i:i+1, :]
+    return out
+
 
 class OrthoView(QtWidgets.QGraphicsView):
     """QGraphicsView ラッパ（簡単な便利設定）"""
@@ -132,6 +149,9 @@ class Viewer2D(QtWidgets.QWidget):
         self._wl = 40.0
         self._ww = 400.0
         self._dcmdir = None
+        # (Z-stretch removed)
+        # Z 方向の行間ギャップ（ピクセル数）
+        self._z_gap_px = 0
 
         # ===== UI =====
         # 上段：操作バー
@@ -157,12 +177,20 @@ class Viewer2D(QtWidgets.QWidget):
             c.setEnabled(False)
             c.stateChanged.connect(self.update_views)
 
+        # Z-flip checkbox for Y/X (coronal/sagittal) views
+        self.chk_flip_z = QtWidgets.QCheckBox("Flip Z ↑/↓")
+        self.chk_flip_z.setChecked(True)
+        self.chk_flip_z.setEnabled(False)
+        self.chk_flip_z.stateChanged.connect(self.update_views)
+
         tog = QtWidgets.QHBoxLayout()
         tog.addWidget(self.chk_show_z); tog.addWidget(self.chk_guid_z)
         tog.addSpacing(12)
         tog.addWidget(self.chk_show_y); tog.addWidget(self.chk_guid_y)
         tog.addSpacing(12)
         tog.addWidget(self.chk_show_x); tog.addWidget(self.chk_guid_x)
+        tog.addSpacing(12)
+        tog.addWidget(self.chk_flip_z)
         tog.addStretch()
 
         # 中段：3ペイン（Z / Y / X）
@@ -187,6 +215,12 @@ class Viewer2D(QtWidgets.QWidget):
         self.sld_wl = QtWidgets.QSlider(QtCore.Qt.Horizontal); self.sld_wl.setRange(-2000, 3000); self.sld_wl.valueChanged.connect(self.on_wl_ww)
         self.sld_ww = QtWidgets.QSlider(QtCore.Qt.Horizontal); self.sld_ww.setRange(1, 6000);   self.sld_ww.valueChanged.connect(self.on_wl_ww)
         self.sld_wl.setEnabled(False); self.sld_ww.setEnabled(False)
+        # Z方向の行間ギャップ（0〜20 px）
+        self.sld_zgap = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sld_zgap.setRange(0, 20)
+        self.sld_zgap.setValue(0)
+        self.sld_zgap.setEnabled(False)
+        self.sld_zgap.valueChanged.connect(self.on_z_gap_changed)
 
         grid = QtWidgets.QGridLayout()
         grid.addWidget(QtWidgets.QLabel("Z (Axial)"), 0, 0); grid.addWidget(self.sld_z, 0, 1)
@@ -194,6 +228,7 @@ class Viewer2D(QtWidgets.QWidget):
         grid.addWidget(QtWidgets.QLabel("X (Sagittal)"), 2, 0); grid.addWidget(self.sld_x, 2, 1)
         grid.addWidget(QtWidgets.QLabel("WL"), 3, 0); grid.addWidget(self.sld_wl, 3, 1)
         grid.addWidget(QtWidgets.QLabel("WW"), 4, 0); grid.addWidget(self.sld_ww, 4, 1)
+        grid.addWidget(QtWidgets.QLabel("Z-gap (px)"), 5, 0); grid.addWidget(self.sld_zgap, 5, 1)
 
         # 情報ラベル
         self.lbl_z = QtWidgets.QLabel("Z: -/-")
@@ -212,7 +247,7 @@ class Viewer2D(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(self)
         lay.addLayout(top)
         lay.addLayout(tog)
-        lay.addLayout(three)
+        lay.addLayout(three, 1)
         lay.addLayout(grid)
         lay.addLayout(info)
 
@@ -253,9 +288,12 @@ class Viewer2D(QtWidgets.QWidget):
         self.sld_x.setRange(0, x-1); self.sld_x.setValue(self._idx_x); self.sld_x.setEnabled(True)
         self.sld_wl.setValue(int(self._wl)); self.sld_ww.setValue(int(self._ww))
         self.sld_wl.setEnabled(True); self.sld_ww.setEnabled(True)
+        self.sld_zgap.setEnabled(True); self.sld_zgap.setValue(0)
+        self._z_gap_px = 0
         self.btn_3d.setEnabled(True)
         for c in (self.chk_show_z, self.chk_show_y, self.chk_show_x, self.chk_guid_z, self.chk_guid_y, self.chk_guid_x):
             c.setEnabled(True)
+        self.chk_flip_z.setEnabled(True)
 
         self.update_views()
 
@@ -331,6 +369,17 @@ class Viewer2D(QtWidgets.QWidget):
     def on_wl_ww(self, _=None):
         self._wl = float(self.sld_wl.value()); self._ww = float(max(self.sld_ww.value(), 1)); self.update_views()
 
+    # (on_z_stretch removed)
+    def _disp_z_row(self, z_count: int, iz: int) -> int:
+        """Return the displayed row (with optional vertical flip and inter-slice gap)."""
+        base = (z_count - 1 - iz) if self.chk_flip_z.isChecked() else iz
+        return base * (self._z_gap_px + 1)
+
+    def on_z_gap_changed(self, v: int):
+        # 1スライスの行と行の間に gap_px ピクセルの空行を差し込む
+        self._z_gap_px = int(v)
+        self.update_views()
+
     # ---------- スライス取得 ----------
     def _slice_z(self):
         return np.ascontiguousarray(self._vol[self._idx_z, :, :])  # (Y,X)
@@ -360,6 +409,13 @@ class Viewer2D(QtWidgets.QWidget):
             return
         z, y, x = self._vol.shape
 
+        # 物理スケール (mm/px) を取得（spacing は (pz, py, px)）
+        pz, py, px = self._spacing
+        # ガード
+        px = float(px) if px else 1.0
+        py = float(py) if py else 1.0
+        pz = float(pz) if pz else 1.0
+
         # 可視切り替え
         self.view_z.setVisible(self.chk_show_z.isChecked())
         self.view_y.setVisible(self.chk_show_y.isChecked())
@@ -373,6 +429,9 @@ class Viewer2D(QtWidgets.QWidget):
             pix = QtGui.QPixmap.fromImage(ndarray_to_qimage(sl))
             self.scene_z.addPixmap(pix)
             self.scene_z.setSceneRect(pix.rect())
+            # Axial は縦=py, 横=px。通常 px==py だが念のため補正
+            scaleY_ax = (px / py)
+            self.view_z.setTransform(QtGui.QTransform().scale(1.0, scaleY_ax))
             self.view_z.fitInView(self.scene_z.itemsBoundingRect(), QtCore.Qt.KeepAspectRatio)
             self.view_z.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
             if self.chk_guid_z.isChecked():
@@ -384,30 +443,46 @@ class Viewer2D(QtWidgets.QWidget):
         self.scene_y.clear(); self._line_y.clear()
         if self.chk_show_y.isChecked():
             sl = wlww_to_uint8(self._slice_y(), self._wl, self._ww)
+            if self.chk_flip_z.isChecked():
+                sl = np.flipud(sl)
+            # Insert horizontal gaps between Z-rows
+            sl = insert_row_gaps(sl, self._z_gap_px, gap_value=0)
             h_y, w_y = sl.shape
             pix = QtGui.QPixmap.fromImage(ndarray_to_qimage(sl))
             self.scene_y.addPixmap(pix)
             self.scene_y.setSceneRect(pix.rect())
+            # Coronal は画像 (Z, X)。縦=Z(pz), 横=X(px) → 縦倍率 = px/pz
+            scaleY_y = (px / pz)
+            self.view_y.setTransform(QtGui.QTransform().scale(1.0, scaleY_y))
             self.view_y.fitInView(self.scene_y.itemsBoundingRect(), QtCore.Qt.KeepAspectRatio)
             self.view_y.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
             if self.chk_guid_y.isChecked():
                 # Z 定数 -> 水平線（row=z）、X 定数 -> 垂直線（col=x）
-                self._line_y.append(self._add_line(self.scene_y, 0, self._idx_z, w_y, self._idx_z))
+                adj_z = self._disp_z_row(z, self._idx_z)
+                self._line_y.append(self._add_line(self.scene_y, 0, adj_z, w_y, adj_z))
                 self._line_y.append(self._add_line(self.scene_y, self._idx_x, 0, self._idx_x, h_y))
 
         # X (Sagittal) 画像は (Z, Y)
         self.scene_x.clear(); self._line_x.clear()
         if self.chk_show_x.isChecked():
             sl = wlww_to_uint8(self._slice_x(), self._wl, self._ww)
+            if self.chk_flip_z.isChecked():
+                sl = np.flipud(sl)
+            # Insert horizontal gaps between Z-rows
+            sl = insert_row_gaps(sl, self._z_gap_px, gap_value=0)
             h_x, w_x = sl.shape
             pix = QtGui.QPixmap.fromImage(ndarray_to_qimage(sl))
             self.scene_x.addPixmap(pix)
             self.scene_x.setSceneRect(pix.rect())
+            # Sagittal は画像 (Z, Y)。縦=Z(pz), 横=Y(py) → 縦倍率 = py/pz
+            scaleY_x = (py / pz)
+            self.view_x.setTransform(QtGui.QTransform().scale(1.0, scaleY_x))
             self.view_x.fitInView(self.scene_x.itemsBoundingRect(), QtCore.Qt.KeepAspectRatio)
             self.view_x.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
             if self.chk_guid_x.isChecked():
                 # Z 定数 -> 水平線（row=z）、Y 定数 -> 垂直線（col=y）
-                self._line_x.append(self._add_line(self.scene_x, 0, self._idx_z, w_x, self._idx_z))
+                adj_z = self._disp_z_row(z, self._idx_z)
+                self._line_x.append(self._add_line(self.scene_x, 0, adj_z, w_x, adj_z))
                 self._line_x.append(self._add_line(self.scene_x, self._idx_y, 0, self._idx_y, h_x))
 
         # ラベル
