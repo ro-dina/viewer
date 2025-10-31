@@ -5,6 +5,11 @@ import numpy as np
 import argparse
 import subprocess
 
+# --- Simple lung HU range defaults (airy parenchyma) ---
+DEFAULT_LUNG_LOW_HU  = -950
+DEFAULT_LUNG_HIGH_HU = -400
+BACKGROUND_HU        = -2000  # value used to zero-out non-lung voxels when masking
+
 # --- VTK required backends ---
 import vtkmodules.vtkInteractionStyle
 import vtkmodules.vtkRenderingOpenGL2
@@ -386,6 +391,12 @@ class VTK3DWindow:
         self.low = self.wl - self.ww/2.0
         self.high = self.wl + self.ww/2.0
 
+        # --- Simple HU mask for lung extraction ---
+        self.seg_enabled = False
+        self.seg_low  = float(DEFAULT_LUNG_LOW_HU)
+        self.seg_high = float(DEFAULT_LUNG_HIGH_HU)
+        self._masked_vtk_img = None  # cached vtkImageData when seg_enabled
+
         self.ren = vtkRenderer()
         self.ren.SetBackground(0.02, 0.02, 0.03)
         self.win = vtkRenderWindow()
@@ -435,6 +446,12 @@ class VTK3DWindow:
         self.slider_high = self._make_slider(-1500, 3000, self.high, 0.60, 0.08, "High", self._on_high_slider)
         self.slider_low.EnabledOff()
         self.slider_high.EnabledOff()
+
+        # Sliders for HU masking (Seg Low/Seg High) — hidden until toggled
+        self.slider_seg_low  = self._make_slider(-1500, 1000, self.seg_low, 0.25, 0.05, "Seg Low",  self._on_seg_low)
+        self.slider_seg_high = self._make_slider(-1500, 1000, self.seg_high, 0.60, 0.05, "Seg High", self._on_seg_high)
+        self.slider_seg_low.EnabledOff()
+        self.slider_seg_high.EnabledOff()
 
         # --- Update status text ---
         self._update_text()
@@ -502,14 +519,59 @@ class VTK3DWindow:
     def _update_text(self):
         if not hasattr(self, "text"):
             return
+        seg = "SEG:ON" if getattr(self, "seg_enabled", False) else "SEG:OFF"
         if self.mode == "band":
-            status = f"Low: {int(self.low)}  High: {int(self.high)}   Mode: Band-pass"
+            status = f"Low: {int(self.low)}  High: {int(self.high)}   Mode: Band-pass   {seg}"
         else:
-            status = f"WL: {int(self.wl)}  WW: {int(self.ww)}   Mode: {'MIP' if self.mip else 'Composite'}"
+            status = f"WL: {int(self.wl)}  WW: {int(self.ww)}   Mode: {'MIP' if self.mip else 'Composite'}   {seg}"
         # Append mapper mode if in 3D
         if hasattr(self, "mip"):
             status += f"   Blend: {'MIP' if self.mip else 'Composite'}"
         self.text.SetInput(status)
+
+    def _rebuild_segmented_image(self):
+        """
+        Build/update a masked vtkImageData from self.vol_np using [self.seg_low, self.seg_high].
+        Voxels outside the range are set to BACKGROUND_HU so they disappear with normal TFs.
+        """
+        try:
+            vol = self.vol_np.astype(np.int16, copy=True)
+            low = int(self.seg_low)
+            high = int(self.seg_high)
+            mask = (vol >= low) & (vol <= high)
+            # Set outside to background HU
+            vol[~mask] = BACKGROUND_HU
+            self._masked_vtk_img = numpy_to_vtk_image(vol, self.spacing, origin=(0,0,0))
+            if self.seg_enabled:
+                self.mapper.SetInputData(self._masked_vtk_img)
+            else:
+                self.mapper.SetInputData(self.vtk_img)
+            # Force a small TF update to ensure refresh
+            self._update_tf()
+        except Exception:
+            # Fallback to original image if anything goes wrong
+            self._masked_vtk_img = None
+            self.mapper.SetInputData(self.vtk_img)
+
+    def _on_seg_low(self, obj, ev):
+        self.seg_low = float(obj.GetRepresentation().GetValue())
+        if self.seg_low > self.seg_high:
+            self.seg_low = self.seg_high - 1.0
+            obj.GetRepresentation().SetValue(self.seg_low)
+        if self.seg_enabled:
+            self._rebuild_segmented_image()
+            self.win.Render()
+        self._update_text()
+
+    def _on_seg_high(self, obj, ev):
+        self.seg_high = float(obj.GetRepresentation().GetValue())
+        if self.seg_high < self.seg_low:
+            self.seg_high = self.seg_low + 1.0
+            obj.GetRepresentation().SetValue(self.seg_high)
+        if self.seg_enabled:
+            self._rebuild_segmented_image()
+            self.win.Render()
+        self._update_text()
 
     def _on_low_slider(self, obj, ev):
         self.low = float(obj.GetRepresentation().GetValue())
@@ -590,12 +652,30 @@ class VTK3DWindow:
                 self.slider_ww.EnabledOn()
             self._update_tf()
             self.win.Render()
+        elif key == 'g':
+            # Toggle HU-masked segmentation on/off
+            self.seg_enabled = not self.seg_enabled
+            # Ensure we have a masked image ready
+            if self.seg_enabled and self._masked_vtk_img is None:
+                self._rebuild_segmented_image()
+            # Swap mapper input
+            if self.seg_enabled and self._masked_vtk_img is not None:
+                self.mapper.SetInputData(self._masked_vtk_img)
+                self.slider_seg_low.EnabledOn()
+                self.slider_seg_high.EnabledOn()
+            else:
+                self.mapper.SetInputData(self.vtk_img)
+                self.slider_seg_low.EnabledOff()
+                self.slider_seg_high.EnabledOff()
+            self._update_tf()
+            self.win.Render()
+            self._update_text()
 
     def start(self, size=(900, 700)):
         self.win.SetSize(*size)
         self.iren.Initialize()
         self.win.Render()
-        print("3D window: M=MIP toggle, +/-=WW, [ / ]=WL")
+        print("3D window: M=MIP toggle, +/-=WW, [ / ]=WL, B=Band-pass, G=HU mask (lung) on/off")
         self.iren.Start()
 
 def run_viewer_mode(vtk_img, vol, spacing, mode: str):
